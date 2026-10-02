@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Unsend moderation · Typhoon Labs</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f5f2e9;color:#1b1d19;font:16px/1.5 system-ui,sans-serif}
+    header{background:#1b1d19;color:#fff;padding:18px 5vw;display:flex;justify-content:space-between;align-items:center;gap:20px}
+    header a{color:#fff;text-decoration:none;font-weight:800;letter-spacing:.08em}main{max-width:1050px;margin:auto;padding:34px 20px 80px}
+    h1{font-size:clamp(32px,5vw,50px);line-height:1.1;margin:0 0 12px}h2{font-size:25px;margin:34px 0 12px}
+    .muted{color:#5b625d}.panel,.item{background:#fff;border:1px solid #252721;padding:20px;margin:14px 0}
+    .panel{max-width:520px}label{display:block;font-weight:700;margin:14px 0 4px}input{width:100%;font:inherit;padding:11px;border:1px solid #777}
+    button{font:inherit;font-weight:700;border:1px solid #1b1d19;background:#1b1d19;color:white;padding:10px 15px;cursor:pointer;margin:6px 8px 0 0}
+    button.secondary{background:white;color:#1b1d19}button.danger{background:#a73630;border-color:#a73630}button:disabled{opacity:.45;cursor:wait}
+    .tag{font-size:12px;font-weight:800;letter-spacing:.08em;color:#315cba;text-transform:uppercase}.body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:17px}
+    .error{color:#9e2929}.empty{padding:14px 0;color:#5b625d}section{border-top:2px solid #1b1d19;margin-top:30px}
+  </style>
+</head>
+<body>
+  <header><a href="/">TYPHOON LABS</a><span>UNSEND / MODERATION</span></header>
+  <main>
+    <h1>Community review</h1>
+    <p class="muted">For approved moderators only. Review pending writing and reports at least daily.</p>
+    <div id="message" role="status"></div>
+    <div id="login" class="panel">
+      <h2>Sign in</h2><p class="muted">Use the named moderator account added in Supabase.</p>
+      <form id="login-form"><label for="email">Email</label><input id="email" type="email" autocomplete="username" required>
+        <label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Sign in</button></form>
+    </div>
+    <div id="queue" hidden>
+      <button id="refresh" class="secondary">Refresh queue</button><button id="signout" class="secondary">Sign out</button>
+      <section><h2>Pending posts <span id="posts-count"></span></h2><div id="posts"></div></section>
+      <section><h2>Pending replies <span id="replies-count"></span></h2><div id="replies"></div></section>
+      <section><h2>Open reports <span id="reports-count"></span></h2><div id="reports"></div></section>
+    </div>
+  </main>
+  <script src="moderation-config.js"></script>
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/+esm';
+    const config = window.UNSEND_MODERATION_CONFIG;
+    const message = document.getElementById('message');
+    const login = document.getElementById('login');
+    const queue = document.getElementById('queue');
+    if (!config?.url || !config?.key) {
+      message.textContent = 'Moderator page is not configured. Ask the project owner to deploy moderation-config.js.';
+      document.getElementById('login-form').querySelector('button').disabled = true;
+    } else {
+      const db = createClient(config.url, config.key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+      const note = (text, error = false) => { message.textContent = text; message.className = error ? 'error' : 'muted'; };
+      const text = (value, className) => { const el = document.createElement('p'); el.textContent = value; if (className) el.className = className; return el; };
+      const button = (label, handler, className = '') => { const el = document.createElement('button'); el.textContent = label; el.className = className; el.onclick = handler; return el; };
+      async function setStatus(table, id, status) {
+        if (!confirm(`Set this ${table.slice(0, -1)} to ${status}?`)) return;
+        note('Saving…');
+        const { data, error } = await db.from(table).update({ status }).eq('id', id).select('id');
+        if (error) { note(error.message, true); return; }
+        if (!data?.length) { note('No row changed. Check moderator access or refresh the queue.', true); return; }
+        note('Saved.'); await loadQueue();
+      }
+      async function reportTarget(report) {
+        const table = report.target_type === 'post' ? 'posts' : 'replies';
+        const { data, error } = await db.from(table).select('id,body,status').eq('id', report.target_id).maybeSingle();
+        if (error) return `Could not load reported content: ${error.message}`;
+        return data ? `${data.body}\nCurrent status: ${data.status}` : 'Content was already deleted.';
+      }
+      async function loadQueue() {
+        note('Loading queue…');
+        const [posts, replies, reports] = await Promise.all([
+          db.from('posts').select('id,body,recipient_type,created_at').eq('status', 'pending').order('created_at').limit(100),
+          db.from('replies').select('id,body,post_id,created_at').eq('status', 'pending').order('created_at').limit(100),
+          db.from('reports').select('id,target_type,target_id,reason,created_at').eq('status', 'open').order('created_at').limit(100),
+        ]);
+        const error = posts.error || replies.error || reports.error;
+        if (error) { note(error.message, true); return; }
+        for (const [name, result] of [['posts', posts], ['replies', replies], ['reports', reports]]) {
+          document.getElementById(`${name}-count`).textContent = `(${result.data.length})`;
+          const area = document.getElementById(name); area.replaceChildren();
+          if (result.data.length === 0) area.append(text('Nothing to review.', 'empty'));
+          for (const item of result.data) {
+            const card = document.createElement('article'); card.className = 'item';
+            const label = name === 'posts' ? item.recipient_type : name === 'replies' ? `Reply to ${item.post_id}` : `${item.reason} · ${item.target_type}`;
+            card.append(text(`${label} · ${new Date(item.created_at).toLocaleString()}`, 'tag'));
+            if (name === 'reports') {
+              const content = text('Loading reported content…', 'body'); card.append(content);
+              reportTarget(item).then((value) => { content.textContent = value; });
+              card.append(button('Hide content and resolve', async () => {
+                if (!confirm('Hide the reported content and resolve this report?')) return;
+                note('Saving…');
+                const targetTable = item.target_type === 'post' ? 'posts' : 'replies';
+                const hide = await db.from(targetTable).update({ status: 'hidden' }).eq('id', item.target_id).select('id');
+                if (hide.error) { note(hide.error.message, true); return; }
+                if (!hide.data?.length) { note('Content was not changed. Check moderator access or whether it was deleted.', true); return; }
+                const resolve = await db.from('reports').update({ status: 'resolved' }).eq('id', item.id).select('id');
+                if (resolve.error) { note(resolve.error.message, true); return; }
+                if (!resolve.data?.length) { note('Content hidden, but report was not resolved. Refresh and try again.', true); return; }
+                note('Content hidden and report resolved.'); await loadQueue();
+              }, 'danger'));
+              card.append(button('Resolve without hiding', () => setStatus('reports', item.id, 'resolved'), 'secondary'));
+            } else {
+              card.append(text(item.body, 'body'));
+              card.append(button('Approve', () => setStatus(name, item.id, 'visible')));
+              card.append(button('Hide', () => setStatus(name, item.id, 'hidden'), 'danger'));
+            }
+            area.append(card);
+          }
+        }
+        note('Queue loaded. If you expect items but see none, verify that your Supabase user ID is in private.moderators.');
+      }
+      document.getElementById('login-form').onsubmit = async (event) => {
+        event.preventDefault(); note('Signing in…');
+        const { error } = await db.auth.signInWithPassword({ email: document.getElementById('email').value.trim(), password: document.getElementById('password').value });
+        document.getElementById('password').value = '';
+        if (error) { note(error.message, true); return; }
+        login.hidden = true; queue.hidden = false; await loadQueue();
+      };
+      document.getElementById('refresh').onclick = loadQueue;
+      document.getElementById('signout').onclick = async () => { await db.auth.signOut(); queue.hidden = true; login.hidden = false; note('Signed out.'); };
+    }
+  </script>
+</body>
+</html>

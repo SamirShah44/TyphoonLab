@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Verify for Unsend</title>
+  <style>body{margin:0;background:#f6f3e9;color:#1b1d19;font:16px system-ui,sans-serif}.wrap{padding:24px}h1{font-size:20px;margin:0 0 12px}p{line-height:1.5;margin:0 0 20px}.error{color:#a22727}</style>
+</head>
+<body>
+  <div class="wrap"><h1>Verify to continue</h1><p>Complete this check to create your anonymous Unsend account.</p><div id="challenge"></div><p class="error" id="error" role="alert"></p></div>
+  <script>
+    function send(type, token) {
+      if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({type,token}));
+    }
+    window.turnstileSuccess = function (token) { send('turnstile-token', token); };
+    window.turnstileFailure = function () {
+      document.getElementById('error').textContent = 'Verification failed. Please try again.';
+      send('turnstile-error', '');
+    };
+    window.turnstileReady = function () {
+      const sitekey = new URLSearchParams(location.search).get('sitekey');
+      if (!sitekey) { window.turnstileFailure(); return; }
+      window.turnstile.render('#challenge', {
+        sitekey, size: 'flexible', theme: 'light',
+        callback: window.turnstileSuccess,
+        'error-callback': window.turnstileFailure,
+        'expired-callback': window.turnstileFailure
+      });
+    };
+  </script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=turnstileReady&amp;render=explicit" async defer></script>
+</body>
+</html>
