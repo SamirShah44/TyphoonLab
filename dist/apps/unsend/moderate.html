@@ -13,7 +13,7 @@
     button{font:inherit;font-weight:700;border:1px solid #1b1d19;background:#1b1d19;color:white;padding:10px 15px;cursor:pointer;margin:6px 8px 0 0}
     button.secondary{background:white;color:#1b1d19}button.danger{background:#a73630;border-color:#a73630}button:disabled{opacity:.45;cursor:wait}
     .tag{font-size:12px;font-weight:800;letter-spacing:.08em;color:#315cba;text-transform:uppercase}.body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:17px}
-    .error{color:#9e2929}.empty{padding:14px 0;color:#5b625d}section{border-top:2px solid #1b1d19;margin-top:30px}
+    .error{color:#9e2929}.empty{padding:14px 0;color:#5b625d}section{border-top:2px solid #1b1d19;margin-top:30px}#captcha{margin-top:16px}
   </style>
 </head>
 <body>
@@ -27,6 +27,17 @@
       <form id="login-form"><label for="email">Email</label><input id="email" type="email" autocomplete="username" required>
         <label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required>
         <button type="submit">Sign in</button></form>
+      <button id="setup-link" class="secondary" type="button">Email a password setup link</button>
+      <div id="captcha"></div>
+    </div>
+    <div id="setup" class="panel" hidden>
+      <h2>Set your password</h2>
+      <p class="muted">Your invitation was accepted. Choose a password for the moderator dashboard.</p>
+      <form id="setup-form">
+        <label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="10" required>
+        <label for="confirm-password">Confirm password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="10" required>
+        <button type="submit">Save password</button>
+      </form>
     </div>
     <div id="queue" hidden>
       <button id="refresh" class="secondary">Refresh queue</button><button id="signout" class="secondary">Sign out</button>
@@ -41,13 +52,43 @@
     const config = window.UNSEND_MODERATION_CONFIG;
     const message = document.getElementById('message');
     const login = document.getElementById('login');
+    const setup = document.getElementById('setup');
     const queue = document.getElementById('queue');
     if (!config?.url || !config?.key) {
       message.textContent = 'Moderator page is not configured. Ask the project owner to deploy moderation-config.js.';
       document.getElementById('login-form').querySelector('button').disabled = true;
     } else {
-      const db = createClient(config.url, config.key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+      const callbackHash = new URLSearchParams(window.location.hash.slice(1));
+      const callbackQuery = new URLSearchParams(window.location.search);
+      const inviteCallback = callbackHash.get('type') === 'invite' || callbackHash.has('access_token') || callbackQuery.has('code');
+      const callbackError = callbackHash.get('error_description');
+      const db = createClient(config.url, config.key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: true } });
       const note = (text, error = false) => { message.textContent = text; message.className = error ? 'error' : 'muted'; };
+      let captchaToken = null;
+      let captchaWidgetId = null;
+      if (config.turnstileSiteKey) {
+        window.unsendModeratorTurnstileReady = () => {
+          captchaWidgetId = window.turnstile.render('#captcha', {
+            sitekey: config.turnstileSiteKey, size: 'flexible', theme: 'light',
+            callback: (token) => { captchaToken = token; },
+            'expired-callback': () => { captchaToken = null; },
+            'error-callback': () => { captchaToken = null; note('Verification failed. Try again.', true); }
+          });
+        };
+        const turnstileScript = document.createElement('script');
+        turnstileScript.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=unsendModeratorTurnstileReady&render=explicit';
+        turnstileScript.async = true;
+        turnstileScript.onerror = () => note('Could not load verification. Try again later.', true);
+        document.head.append(turnstileScript);
+      }
+      const readyToAuthenticate = () => {
+        if (config.turnstileSiteKey && !captchaToken) { note('Complete verification first.', true); return false; }
+        return true;
+      };
+      const resetCaptcha = () => {
+        captchaToken = null;
+        if (captchaWidgetId !== null && window.turnstile) window.turnstile.reset(captchaWidgetId);
+      };
       const text = (value, className) => { const el = document.createElement('p'); el.textContent = value; if (className) el.className = className; return el; };
       const button = (label, handler, className = '') => { const el = document.createElement('button'); el.textContent = label; el.className = className; el.onclick = handler; return el; };
       async function setStatus(table, id, status) {
@@ -108,14 +149,56 @@
         note('Queue loaded. If you expect items but see none, verify that your Supabase user ID is in private.moderators.');
       }
       document.getElementById('login-form').onsubmit = async (event) => {
-        event.preventDefault(); note('Signing in…');
-        const { error } = await db.auth.signInWithPassword({ email: document.getElementById('email').value.trim(), password: document.getElementById('password').value });
+        event.preventDefault();
+        if (!readyToAuthenticate()) return;
+        note('Signing in…');
+        const options = captchaToken ? { captchaToken } : undefined;
+        const { error } = await db.auth.signInWithPassword({ email: document.getElementById('email').value.trim(), password: document.getElementById('password').value, options });
+        resetCaptcha();
         document.getElementById('password').value = '';
         if (error) { note(error.message, true); return; }
         login.hidden = true; queue.hidden = false; await loadQueue();
       };
+      document.getElementById('setup-link').onclick = async () => {
+        const email = document.getElementById('email').value.trim();
+        if (!email) { note('Enter the moderator email above first.', true); return; }
+        if (!readyToAuthenticate()) return;
+        if (!confirm(`Send a password setup link to ${email}?`)) return;
+        note('Requesting link…');
+        const { error } = await db.auth.resetPasswordForEmail(email, {
+          redirectTo: 'https://typhoonlabs.dev/apps/unsend/moderate.html',
+          ...(captchaToken ? { captchaToken } : {})
+        });
+        resetCaptcha();
+        if (error) { note(error.message, true); return; }
+        note('If this email has an account, check its inbox for a setup link.');
+      };
+      document.getElementById('setup-form').onsubmit = async (event) => {
+        event.preventDefault();
+        const password = document.getElementById('new-password').value;
+        if (password !== document.getElementById('confirm-password').value) {
+          note('Passwords do not match.', true); return;
+        }
+        note('Saving password…');
+        const { error } = await db.auth.updateUser({ password });
+        if (error) { note(error.message, true); return; }
+        await db.auth.signOut();
+        document.getElementById('setup-form').reset();
+        setup.hidden = true; login.hidden = false;
+        note('Password saved. Sign in with your email and new password.');
+      };
       document.getElementById('refresh').onclick = loadQueue;
       document.getElementById('signout').onclick = async () => { await db.auth.signOut(); queue.hidden = true; login.hidden = false; note('Signed out.'); };
+      if (inviteCallback || callbackError) {
+        const { data, error } = await db.auth.getSession();
+        window.history.replaceState({}, document.title, window.location.pathname);
+        if (callbackError || error || !data.session) {
+          note(callbackError || error?.message || 'Invite link expired or could not be accepted. Request a new invitation.', true);
+        } else {
+          login.hidden = true; setup.hidden = false;
+          note('Invite accepted. Set your password below.');
+        }
+      }
     }
   </script>
 </body>
