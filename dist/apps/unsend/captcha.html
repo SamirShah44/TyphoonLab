@@ -4,27 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Verify for Unsend</title>
-  <style>body{margin:0;background:#f6f3e9;color:#1b1d19;font:16px system-ui,sans-serif}.wrap{padding:24px}h1{font-size:20px;margin:0 0 12px}p{line-height:1.5;margin:0 0 20px}.error{color:#a22727}</style>
+  <style>body{margin:0;background:#f6f3e9;color:#1b1d19;font:16px system-ui,sans-serif}body.dark{background:#1d231f;color:#f4f1e8;color-scheme:dark}.wrap{padding:16px 8px}h1{font-size:20px;margin:0 0 12px}p{line-height:1.5;margin:0 0 20px}.error{color:#a22727}body.dark .error{color:#ff9486}</style>
 </head>
 <body>
   <div class="wrap"><h1>Verify to continue</h1><p>Complete this check to create your anonymous Unsend account.</p><div id="challenge"></div><p class="error" id="error" role="alert"></p></div>
   <script>
-    function send(type, token) {
-      if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({type,token}));
+    function send(type, token, code) {
+      if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify({type,token,code}));
     }
     window.turnstileSuccess = function (token) { send('turnstile-token', token); };
-    window.turnstileFailure = function () {
+    window.turnstileFailure = function (code) {
       document.getElementById('error').textContent = 'Verification failed. Please try again.';
-      send('turnstile-error', '');
+      send('turnstile-error', '', typeof code === 'string' ? code : 'unknown');
     };
     window.turnstileReady = function () {
-      const sitekey = new URLSearchParams(location.search).get('sitekey');
-      if (!sitekey) { window.turnstileFailure(); return; }
+      const params = new URLSearchParams(location.search);
+      const sitekey = params.get('sitekey');
+      const theme = params.get('theme') === 'dark' ? 'dark' : 'light';
+      document.body.classList.toggle('dark', theme === 'dark');
+      if (!sitekey) { window.turnstileFailure('missing-site-key'); return; }
       window.turnstile.render('#challenge', {
-        sitekey, size: 'flexible', theme: 'light',
+        sitekey, size: window.innerWidth < 320 ? 'compact' : 'flexible', theme,
         callback: window.turnstileSuccess,
         'error-callback': window.turnstileFailure,
-        'expired-callback': window.turnstileFailure
+        'expired-callback': function () { window.turnstileFailure('expired'); },
+        'timeout-callback': function () { window.turnstileFailure('timeout'); }
       });
     };
   </script>
